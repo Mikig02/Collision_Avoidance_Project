@@ -136,7 +136,7 @@ Key hyperparameters (defined at the top of `train_dqn.py`):
 | `GAMMA` | 0.99 | Discount factor |
 | `LR` | 0.0005 | Adam learning rate |
 | `TARGET_UPDATE_FREQ` | 200 | Target-network hard-update interval (steps) |
-| `BETA` | 0.997 | ε-decay rate per episode (`ε_{k+1} = β·ε_k`) |
+| `BETA` | 0.999 | ε-decay rate per episode (`ε_{k+1} = β·ε_k`) |
 | `EPSILON_START → EPSILON_MIN` | 1.0 → 0.05 | Exploration schedule |
 
 > **Decay-rate comparison.** The target-update frequency is **not** fixed by the
