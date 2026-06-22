@@ -1,0 +1,218 @@
+"""
+Avvio:
+    1. ros2 launch storm_description sim.launch.py
+    2. source ~/storm_env/bin/activate
+       python3 train_dqn.py
+"""
+
+from datetime import datetime
+import os
+import random
+import time
+import collections
+import numpy as np
+import tensorflow as tf
+
+from storm_env import StormEnv
+
+# ---------------------------------------------------------------------------
+# Iperparametri
+# ---------------------------------------------------------------------------
+MAX_EPISODES          = 3000
+MAX_STEPS_PER_EPISODE = 1000
+
+BUFFER_SIZE        = 50000
+BATCH_SIZE         = 64
+GAMMA              = 0.99
+LR                 = 0.0005
+TARGET_UPDATE_FREQ = 2000
+
+BETA          = 0.998
+EPSILON_START = 1.0
+EPSILON_MIN   = 0.05
+
+WINDOW_SIZE    = 50
+SAVE_THRESHOLD = 500
+SAVE_DIR = os.path.expanduser('~/storm_dqn/storm_agents')
+LOG_DIR  = os.path.expanduser('~/storm_dqn/logs')
+
+N_OBS     = 52
+N_ACTIONS = 11
+
+
+def build_qnet(name='QNet'):
+    return tf.keras.Sequential([
+        tf.keras.layers.Input(shape=(N_OBS,)),
+        tf.keras.layers.Dense(300, activation='relu'),
+        tf.keras.layers.Dense(300, activation='relu'),
+        tf.keras.layers.Dense(N_ACTIONS, activation='linear'),
+    ], name=name)
+
+
+class ReplayBuffer:
+    def __init__(self, maxlen):
+        self.buf = collections.deque(maxlen=maxlen)
+
+    def add(self, obs, action, reward, next_obs, done):
+        self.buf.append((obs, action, reward, next_obs, float(done)))
+
+    def sample(self, n):
+        batch = random.sample(self.buf, n)
+        obs, act, rew, nobs, done = zip(*batch)
+        return (np.array(obs,  dtype=np.float32),
+                np.array(act,  dtype=np.int32),
+                np.array(rew,  dtype=np.float32),
+                np.array(nobs, dtype=np.float32),
+                np.array(done, dtype=np.float32))
+
+    def __len__(self):
+        return len(self.buf)
+
+
+@tf.function
+def train_step(q_net, target_net, optimizer,
+               obs_b, act_b, rew_b, nobs_b, done_b):
+    best_actions = tf.argmax(q_net(nobs_b, training=False), axis=1)
+    nq = tf.reduce_sum(
+        target_net(nobs_b, training=False) *
+        tf.one_hot(best_actions, N_ACTIONS), axis=1)
+    targets = rew_b + GAMMA * nq * (1.0 - done_b)
+
+    with tf.GradientTape() as tape:
+        q_pred = tf.reduce_sum(
+            q_net(obs_b, training=True) *
+            tf.one_hot(act_b, N_ACTIONS), axis=1)
+        loss = tf.reduce_mean(tf.square(targets - q_pred))
+
+    grads = tape.gradient(loss, q_net.trainable_variables)
+    optimizer.apply_gradients(zip(grads, q_net.trainable_variables))
+    return loss
+
+
+def main():
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    os.makedirs(LOG_DIR,  exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_name  = f"{timestamp}_da_zero_beta{BETA}"
+    log_dir   = os.path.join(LOG_DIR, run_name)
+    os.makedirs(log_dir, exist_ok=True)
+    writer = tf.summary.create_file_writer(log_dir)
+
+    print('Creazione environment...')
+    env = StormEnv(max_steps=MAX_STEPS_PER_EPISODE)
+    print('Environment pronto.\n')
+
+    q_net      = build_qnet('online')
+    target_net = build_qnet('target')
+    
+    # Inizializza la target network con pesi identici a quella online alla partenza
+    target_net.set_weights(q_net.get_weights())
+
+    epsilon       = EPSILON_START
+    optimizer     = tf.keras.optimizers.Adam(learning_rate=LR)
+    buffer        = ReplayBuffer(BUFFER_SIZE)
+    total_steps   = 0
+    ep_rewards    = []
+    goals_reached = 0
+    t_start       = time.time()
+
+    print('=' * 65)
+    print('DDQN Goal Navigation — Partenza da ZERO')
+    print(f'Episodi: {MAX_EPISODES} | β={BETA} | ε iniziale={epsilon:.1f}')
+    print('=' * 65)
+
+    for ep in range(1, MAX_EPISODES + 1):
+
+        obs, _ = env.reset(options={'episode': ep})
+        ep_reward    = 0
+        ep_steps     = 0
+        losses       = []
+        goal_reached = False
+        ep_esito     = 'TIMEOUT'
+
+        for _ in range(MAX_STEPS_PER_EPISODE):
+
+            if random.random() < epsilon:
+                action = random.randint(0, N_ACTIONS - 1)
+            else:
+                qvals  = q_net(obs[np.newaxis], training=False).numpy()[0]
+                action = int(np.argmax(qvals))
+
+            next_obs, reward, terminated, truncated, _ = env.step(action)
+            done = terminated or truncated
+
+            if terminated:
+                if reward > 0:
+                    goal_reached = True
+                    ep_esito = 'GOAL'
+                else:
+                    ep_esito = 'COLLISIONE'
+            elif truncated:
+                ep_esito = 'TIMEOUT'
+
+            buffer.add(obs, action, reward, next_obs, done)
+            obs        = next_obs
+            ep_reward += reward
+            ep_steps  += 1
+            total_steps += 1
+
+            if len(buffer) >= BATCH_SIZE:
+                obs_b, act_b, rew_b, nobs_b, done_b = buffer.sample(BATCH_SIZE)
+                loss = train_step(
+                    q_net, target_net, optimizer,
+                    obs_b, act_b, rew_b, nobs_b, done_b)
+                losses.append(float(loss))
+
+                if total_steps % TARGET_UPDATE_FREQ == 0:
+                    target_net.set_weights(q_net.get_weights())
+
+            if done:
+                break
+
+        if epsilon > EPSILON_MIN:
+            epsilon = max(EPSILON_MIN, epsilon * BETA)
+
+        if goal_reached:
+            goals_reached += 1
+
+        ep_rewards.append(ep_reward)
+        avg      = np.mean(ep_rewards[-WINDOW_SIZE:])
+        avg_loss = float(np.mean(losses)) if losses else 0.0
+        elapsed  = (time.time() - t_start) / 60.0
+
+        with writer.as_default():
+            tf.summary.scalar('reward/episode',  ep_reward,           step=ep)
+            tf.summary.scalar('reward/avg50',    avg,                 step=ep)
+            tf.summary.scalar('train/loss',      avg_loss,            step=ep)
+            tf.summary.scalar('train/epsilon',   epsilon,             step=ep)
+            tf.summary.scalar('goal/reached_ep', float(goal_reached), step=ep)
+            tf.summary.scalar('goal/total',      goals_reached,       step=ep)
+
+        print(f'Ep {ep:4d}/{MAX_EPISODES}  '
+              f'steps {ep_steps:4d}  '
+              f'rew {ep_reward:8.1f}  '
+              f'avg50 {avg:8.1f}  '
+              f'eps {epsilon:.4f}  '
+              f'goals {goals_reached:4d}  '
+              f'{elapsed:.1f}min  '
+              f'{ep_esito}')
+
+        if ep_reward >= SAVE_THRESHOLD:
+            path = os.path.join(SAVE_DIR, f'agent_ep{ep}_r{int(ep_reward)}.weights.h5')
+            q_net.save_weights(path)
+            print(f'  *** Salvato: {path}')
+
+        if ep % 100 == 0:
+            path = os.path.join(SAVE_DIR, f'checkpoint_ep{ep}.weights.h5')
+            q_net.save_weights(path)
+            print(f'  [checkpoint] {path}')
+
+    final = os.path.join(SAVE_DIR, 'storm_ddqn_goal_final.weights.h5')
+    q_net.save_weights(final)
+    print(f'\nTraining completato.')
+    print(f'Goal raggiunti: {goals_reached}/{MAX_EPISODES}')
+    env.close()
+
+if __name__ == '__main__':
+    main()

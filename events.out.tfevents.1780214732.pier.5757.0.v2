@@ -1,0 +1,91 @@
+import os
+import time
+import numpy as np
+import tensorflow as tf
+from storm_env import StormEnv
+
+N_OBS     = 52
+N_ACTIONS = 11
+
+def build_qnet(name='QNet'):
+    """Costruisce l'architettura della Rete Neurale."""
+    return tf.keras.Sequential([
+        tf.keras.layers.Input(shape=(N_OBS,)),
+        tf.keras.layers.Dense(300, activation='relu'),
+        tf.keras.layers.Dense(300, activation='relu'),
+        tf.keras.layers.Dense(N_ACTIONS, activation='linear'),
+    ], name=name)
+
+def main():
+    print('=' * 60)
+    print('DDQN TEST - Partenza dalla posizione di Launch')
+    print('=' * 60)
+
+    print('Inizializzazione environment...')
+    env = StormEnv()
+    
+    q_net = build_qnet('test_online')
+    
+    # -----------------------------------------------------------------------
+    # NOME DEL FILE DEI PESI
+    # -----------------------------------------------------------------------
+    NOME_FILE_PESI = 'storm_ddqn_final.weights.h5' 
+    PATH_PESI = os.path.expanduser(f'~/storm_dqn/storm_agents/{NOME_FILE_PESI}')
+    
+    if not os.path.exists(PATH_PESI):
+        print(f"\n❌ ERRORE: Il file {PATH_PESI} non esiste!")
+        env.close()
+        return
+
+    print(f'Caricamento pesi da: {PATH_PESI}...')
+    q_net.load_weights(PATH_PESI)
+    print('Pesi caricati con successo.\n')
+    
+    NUM_TEST_EPISODES = 5
+    
+    for ep in range(1, NUM_TEST_EPISODES + 1):
+        
+        # -------------------------------------------------------------------
+        # LA MODIFICA: Reset pulito. Niente più 'options' per ingannare l'ambiente.
+        # -------------------------------------------------------------------
+        obs, _ = env.reset() 
+        
+        ep_reward = 0
+        steps = 0
+        
+        print(f"🚀 Partenza Test Episodio {ep}/{NUM_TEST_EPISODES}...")
+        time.sleep(1.0) 
+        
+        while True:
+            qvals  = q_net(obs[np.newaxis], training=False).numpy()[0]
+            action = int(np.argmax(qvals))
+            
+            obs, reward, terminated, truncated, _ = env.step(action)
+            ep_reward += reward
+            steps += 1
+            
+            dist_attuale = obs[-2] 
+            
+            # Condizione Vittoria (Tolleranza 0.60 metri per la bandiera)
+            if dist_attuale < 0.60:
+                print(f"   🎉 OBIETTIVO RAGGIUNTO ALLA PERFEZIONE!")
+                print(f"   📍 Distanza dalla bandiera: {dist_attuale:.2f} metri.")
+                print(f"   ⏱️  Passi impiegati: {steps}")
+                print(f"   📊 Reward accumulata: {ep_reward:.2f}\n")
+                break
+                
+            # Condizione Fallimento
+            elif terminated or truncated:
+                print(f"   💥 COLLISIONE o TIMEOUT!")
+                print(f"   📍 Distanza di schianto: {dist_attuale:.2f} metri.")
+                print(f"   ⏱️  Passi sopravvissuti: {steps}")
+                print(f"   📊 Reward accumulata: {ep_reward:.2f}\n")
+                break
+                
+        time.sleep(2.0)
+
+    print('Sessione di test conclusa.')
+    env.close()
+
+if __name__ == '__main__':
+    main()

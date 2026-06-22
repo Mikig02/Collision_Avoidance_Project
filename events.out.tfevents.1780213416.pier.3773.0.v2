@@ -1,0 +1,25 @@
+=============
+     1 - NUOVO TERMINALE
+=============
+cd ~/ros_ws
+
+rm -rf build/ install/ log/
+
+colcon build --symlink-install
+
+source install/setup.bash
+
+ros2 launch storm_description sim.launch.py
+
+=============
+      2 - NUOVO TERMINALE 
+=============
+source ~/storm_env/bin/activate
+cd ~/storm_dqn
+python3 train_dqn.py
+
+=============
+     3 - NUOVO TERMINALE
+=============
+source ~/storm_env/bin/activate
+tensorboard --logdir ~/storm_dqn/logs
